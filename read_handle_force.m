@@ -8,7 +8,10 @@ function data = read_handle_force(result_file)
 %     data - [N x 2] 矩阵, 第 1 列时间(s), 第 2 列力(N)
 %
 %   说明:
-%     Adams 导出的 tab 文件可能有若干行表头 (以非数字字符开头),
+%     Adams 导出的 tab 文件格式多样:
+%       - 可能有若干行表头 (以非数字字符开头)
+%       - 数据列可能用 tab、空格或逗号分隔
+%       - 可能包含科学计数法 (1.234E+05)
 %     本函数自动跳过表头, 只读取数值行。
 
     fid = fopen(result_file, 'r');
@@ -20,29 +23,52 @@ function data = read_handle_force(result_file)
     force_data = [];
 
     while ~feof(fid)
-        line = strtrim(fgetl(fid));
+        raw_line = fgetl(fid);
 
-        % 跳过空行
-        if isempty(line) || ~ischar(line)
+        % fgetl 返回 -1 表示 EOF
+        if ~ischar(raw_line)
             continue;
         end
 
-        % 跳过表头行 (以字母或特殊字符开头)
+        line = strtrim(raw_line);
+
+        % 跳过空行
+        if isempty(line)
+            continue;
+        end
+
+        % 跳过表头行 (以字母或特殊字符开头, 但允许正负号)
         if ~is_numeric_line(line)
             continue;
         end
 
-        % 解析数值
-        vals = sscanf(line, '%f');
+        % 尝试用多种分隔符解析
+        % 替换逗号为空格, 然后用 sscanf
+        line_clean = strrep(line, ',', ' ');
+        line_clean = strrep(line_clean, '\t', ' ');
+        vals = sscanf(line_clean, '%f');
+
         if length(vals) >= 2
             time_data(end+1, 1)  = vals(1);  %#ok<AGROW>
             force_data(end+1, 1) = vals(2);  %#ok<AGROW>
+        elseif length(vals) == 1
+            % 某些格式中时间和数据在交替行, 跳过单值行
+            continue;
         end
     end
 
     fclose(fid);
 
     if isempty(time_data)
+        % 打印文件前 10 行帮助诊断
+        fprintf('  [诊断] 结果文件前 10 行:\n');
+        fid2 = fopen(result_file, 'r');
+        for i = 1:10
+            ln = fgetl(fid2);
+            if ~ischar(ln), break; end
+            fprintf('    %d: %s\n', i, ln);
+        end
+        fclose(fid2);
         error('结果文件中未找到有效数据: %s', result_file);
     end
 
