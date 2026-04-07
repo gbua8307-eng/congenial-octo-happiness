@@ -259,15 +259,32 @@ function [time, force] = run_adams_simulation(x, cfg)
     fprintf(fid, '   model_name = .MODEL_1\n');
     fprintf(fid, '!\n');
 
-    % Export results: use numeric_results to write handle force to tab file
-    % First create a result set, then write to file
-    fprintf(fid, 'numeric_results  &\n');
-    fprintf(fid, '   select  &\n');
-    fprintf(fid, '   result_set_component_name = %s\n', cfg.measure_name);
+    % Export results using Adams/PostProcessor spreadsheet export
+    % Method: switch to postprocessor, create plot, then export to file
     fprintf(fid, '!\n');
-    fprintf(fid, 'file numeric_results write  &\n');
+    fprintf(fid, '! --- Switch to Adams/PostProcessor and export results ---\n');
+    fprintf(fid, 'interface push_button  &\n');
+    fprintf(fid, '   button_name = .gui.main.ppt\n');
+    fprintf(fid, '!\n');
+
+    % Create a plot page and add the measure curve
+    fprintf(fid, 'xy_plots template create  &\n');
+    fprintf(fid, '   template_name = handle_force_plot  &\n');
+    fprintf(fid, '   title = "Handle Force"\n');
+    fprintf(fid, '!\n');
+    fprintf(fid, 'xy_plots curve create  &\n');
+    fprintf(fid, '   curve_name = handle_force_plot.force_curve  &\n');
+    fprintf(fid, '   x_axis_component = sim_time  &\n');
+    fprintf(fid, '   y_axis_component = %s\n', cfg.measure_name);
+    fprintf(fid, '!\n');
+
+    % Export the curve data to tab-separated file
+    fprintf(fid, 'file table write  &\n');
     fprintf(fid, '   file_name = "%s"  &\n', tab_file);
-    fprintf(fid, '   write_to = new_file\n');
+    fprintf(fid, '   comments = off  &\n');
+    fprintf(fid, '   curve_name = handle_force_plot.force_curve  &\n');
+    fprintf(fid, '   write_to = new_file  &\n');
+    fprintf(fid, '   separator = tab\n');
     fprintf(fid, '!\n');
 
     % Stop Adams
@@ -283,19 +300,29 @@ function [time, force] = run_adams_simulation(x, cfg)
 
     [status, cmdout] = system(adams_cmd);
 
+    % Always save Adams console output for diagnostics
+    log_file = fullfile(cfg.work_dir, 'adams_last_run.log');
+    fid2 = fopen(log_file, 'w');
+    fprintf(fid2, '%s', cmdout);
+    fclose(fid2);
+
     if status ~= 0
         warning('Adams returned non-zero exit code: %d', status);
-        % Save Adams output for debugging
-        log_file = fullfile(cfg.work_dir, 'adams_error.log');
-        fid2 = fopen(log_file, 'w');
-        fprintf(fid2, '%s', cmdout);
-        fclose(fid2);
-        fprintf('  Adams output saved to: %s\n', log_file);
+        fprintf('  Adams log saved to: %s\n', log_file);
+        fprintf('  Please check the log for error details.\n');
     end
 
     % --- 3. Read results from tab file ---
     if ~isfile(tab_file)
         warning('Output file not found: %s', tab_file);
+        fprintf('  Adams log saved to: %s\n', log_file);
+        fprintf('  *** TROUBLESHOOTING ***\n');
+        fprintf('  1. Open %s and check for errors\n', log_file);
+        fprintf('  2. Try running run_batch.cmd manually in Adams/View:\n');
+        fprintf('     File -> Run Script -> select run_batch.cmd\n');
+        fprintf('  3. If export fails, run run_batch_alt.cmd (alternative method)\n');
+        % Generate alternative batch file with different export method
+        write_alt_batch_cmd(cfg, x);
         return;
     end
 
@@ -353,4 +380,47 @@ function [time, force] = read_handle_force_tab(tab_file)
             fclose(fid);
         end
     end
+end
+
+%% ========== ALTERNATIVE BATCH CMD (backup export method) =================
+function write_alt_batch_cmd(cfg, x)
+    % Generates an alternative batch cmd using 'numeric_results' export
+    % Try this if the primary 'file table write' method doesn't work
+    alt_file = fullfile(cfg.work_dir, 'run_batch_alt.cmd');
+    model_cmd_file = fullfile(cfg.work_dir, [cfg.model_name, '.cmd']);
+    tab_file = fullfile(cfg.work_dir, cfg.output_file);
+
+    fid = fopen(alt_file, 'w');
+    if fid == -1; return; end
+
+    fprintf(fid, '! Alternative batch command file (Method B)\n!\n');
+    fprintf(fid, 'file command read file_name = "%s"\n!\n', model_cmd_file);
+
+    fprintf(fid, 'variable modify variable_name = .MODEL_1.DV_LINK1_LENGTH real_value = %.10f\n', x(1));
+    fprintf(fid, 'variable modify variable_name = .MODEL_1.DV_1 real_value = %.10f\n', x(2));
+    fprintf(fid, 'variable modify variable_name = .MODEL_1.DV_2 real_value = %.10f\n', x(3));
+    fprintf(fid, 'variable modify variable_name = .MODEL_1.DV_3 real_value = %.10f\n!\n', x(4));
+
+    fprintf(fid, 'simulation single_run transient  &\n');
+    fprintf(fid, '   type = auto_select  &\n');
+    fprintf(fid, '   initial_static = no  &\n');
+    fprintf(fid, '   end_time = %.4f  &\n', cfg.end_time);
+    fprintf(fid, '   number_of_steps = %d  &\n', cfg.num_steps);
+    fprintf(fid, '   model_name = .MODEL_1\n!\n');
+
+    % Method B: use numeric_results (flat syntax, no line continuation)
+    fprintf(fid, 'numeric_results select result_set_component_name = %s\n', cfg.measure_name);
+    fprintf(fid, 'file numeric_results write file_name = "%s" write_to = new_file\n!\n', tab_file);
+
+    % Method C: use results export (some Adams versions prefer this)
+    % Uncomment below and comment above if Method B also fails:
+    fprintf(fid, '! --- Method C (uncomment if Method B fails) ---\n');
+    fprintf(fid, '! results export  &\n');
+    fprintf(fid, '!    file_name = "%s"  &\n', tab_file);
+    fprintf(fid, '!    result_set_component_name = %s\n!\n', cfg.measure_name);
+
+    fprintf(fid, 'stop\n');
+    fclose(fid);
+
+    fprintf('  Alternative batch file written: %s\n', alt_file);
 end
